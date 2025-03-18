@@ -1,0 +1,319 @@
+module alu_auto #(
+    CLK_FREQ = 10000000) 
+(
+    input clk,  // clock
+    input rst,  // reset
+    input io_button[5],
+    input io_dip[3][8],
+    output io_led[3][8],
+    output io_segment[8],
+    output io_select[4],
+    output led[8]
+) {
+    enum States_MANUAL{
+        IDLE,
+        STORE16AFIRST,
+        STORE16ALAST,
+        STORE16BFIRST,
+        STORE16BLAST,
+        SETALU,
+        DISPLAY
+        
+        
+    }
+    
+enum States_AUTO{
+        IDLE,
+        RESULT,
+        DISPLAYA,
+        DISPLAYB,
+        DISPLAYALUFN,
+        CHECKER,
+        ERR
+
+    }
+    
+    sig slowclock
+    const CLK_FREQ1 = $is_sim() ? 1000: 10000000 
+    const SLOW_CLOCK_DEFAULT_SPEED = $is_sim() ? 9 : 26
+    rom_A rom_a //module with values of a for test cases
+    rom_B rom_b //module with values of b for test cases
+    rom_ALUFN rom_alufn //module with values of alufn for auto test cases
+    rom_ExpectedOutput rom_out //module with values of expected outputs for test cases
+    
+    alu alu
+    .clk(clk){
+        // condition buttons
+        edge_detector io_button_edge[5](#RISE(5x{{1}}),#FALL(5x{{0}}))
+        button_conditioner io_button_cond[5](#CLK_FREQ(5x{{CLK_FREQ1}}))
+
+        // create slow clock for auto tester
+        edge_detector slow_clock_edge(#RISE(1),#FALL(0))
+        .rst(rst){
+
+            //state of manual FSM
+            dff states[$width(States_MANUAL)](#INIT(States_MANUAL.IDLE))
+
+            //state of auto FSM
+            dff states1[$width(States_AUTO)](#INIT(States_AUTO.IDLE))
+
+            //values for computation
+            dff afirsthalf[16]
+            dff asecondthalf[16]
+            dff bfirsthalf[16]
+            dff bsecondhalf[16]
+            dff alufn[6]
+
+            //value to display on io led
+            dff result[32](#INIT(32b0))
+
+            // for slow clock
+            dff counter[32]
+            dff speed_pointer[5](#INIT(SLOW_CLOCK_DEFAULT_SPEED))
+            dff slow_clock_enable(#INIT(0))
+
+            // to keep track of current address of values for auto FSM
+            dff counter_ROM[6](#INIT(0))
+
+            dff zsig(#INIT(1))
+            dff vsig(#INIT(0))
+            dff nsig
+
+            // 1 if in manual mode, 0 if in auto mode
+            dff manuallock(#INIT(0))
+
+            // 1 if evaluated output corresponds to expected output(for auto tester), else 0
+            dff checkersig(#INIT(0))
+        }
+    }
+    always {
+        // implement alu tester logic here
+        
+        // 
+        rom_a.address = counter_ROM.q
+        rom_b.address = counter_ROM.q
+        rom_alufn.address = counter_ROM.q
+        rom_out.address = counter_ROM.q
+
+        // concatenate two halves of a/b together to get their full values
+        alu.a = c{afirsthalf.q,asecondthalf.q}
+        alu.b = c{bfirsthalf.q,bsecondhalf.q}
+        alu.alufn = alufn.q
+
+        //dff default value, to be changed in switch case
+        afirsthalf.d = afirsthalf.q
+        asecondthalf.d = asecondthalf.q
+        bfirsthalf.d = bfirsthalf.q
+        bsecondhalf.d = bsecondhalf.q
+        alufn.d = alufn.q
+        result.d = result.q
+        states1.d = states1.q
+        counter_ROM.d = counter_ROM.q
+
+        zsig.d = zsig.q
+        vsig.d = vsig.q
+        nsig.d = nsig.q
+
+        manuallock.d = manuallock.q
+        checkersig.d = checkersig.q
+        
+        // Set up the speed of the counter before we start the counter machine
+        speed_pointer.d = speed_pointer.q 
+        counter.d = counter.q + 1
+        slowclock = counter.q[speed_pointer.q]
+
+        states.d = states.q
+
+        io_button_cond.in = io_button[4:0]
+        io_button_edge.in = io_button_cond.out
+        
+        // Edge detector takes in the slow_clock signal at rising edge only
+        slow_clock_edge.in = slowclock 
+        slow_clock_enable.d = slow_clock_enable.q
+        
+        case(slow_clock_enable.q){
+            0:
+            // always don't increment or decrement if "no edge signal"
+            slow_clock_edge.in = 0 
+            1:
+            // If "yes edge signal" , output wtv we have as the slow_clock signal
+            slow_clock_edge.in = slowclock 
+
+        }
+        
+        
+        
+        io_led = {result.q[31:24],result.q[23:16],result.q[7:0]}
+        io_segment = 0
+        io_select = 4hF
+        led = c{slowclock,3b0,checkersig.q,zsig.q,vsig.q,nsig.q}
+
+        //auto fsm
+        case(states1.q){
+
+            States_AUTO.IDLE:
+
+            // start auto tester
+            if((~slow_clock_enable.q && io_button_edge.out[1]) && ~manuallock.q){
+            slow_clock_enable.d = 1 // enable slow clock
+            states1.d = States_AUTO.DISPLAYA // proceed to next state (a value)
+                }
+
+            // proceed to next test case of auto tester
+            else if (slow_clock_enable.q && checkersig.q && ~manuallock.q){
+                    counter_ROM.d = counter_ROM.q + 1
+                    states1.d = States_AUTO.DISPLAYA // proceed to next state (a value)
+                }
+            
+            // error case detected, halt auto tester
+            else if (slow_clock_enable.q && ~checkersig.q && ~manuallock.q){
+                slow_clock_enable.d = 0
+                manuallock.d = 0
+                states1.d = States_AUTO.IDLE
+                }
+            
+            
+            States_AUTO.DISPLAYA:
+
+            // assign values of a to dffs for calculation and display on io led
+            if(slow_clock_edge.out){
+            result.d = rom_a.element
+            afirsthalf.d = rom_a.element[31:16]
+            asecondthalf.d = rom_a.element[15:0]
+            states1.d = States_AUTO.DISPLAYB // proceed to next state (b value)
+                }
+            
+            
+            States_AUTO.DISPLAYB:
+
+            // assign values of b to dffs for calculation and display on io led
+            if(slow_clock_edge.out){
+            result.d = rom_b.element
+            bfirsthalf.d = rom_b.element[31:16]
+            bsecondhalf.d = rom_b.element[15:0] 
+            states1.d = States_AUTO.DISPLAYALUFN // proceed to next state (alufn value)
+                }
+
+            
+            States_AUTO.DISPLAYALUFN:
+
+            // assign values of alufn to dffs for calculation and display
+            if(slow_clock_edge.out){
+            result.d = c{26b0,rom_alufn.element}
+            alufn.d = rom_alufn.element
+
+            states1.d = States_AUTO.RESULT // proceed to next state (eval results)
+                }
+
+            States_AUTO.RESULT:
+
+            // evaluate output based on current a, b, alufn values
+            if(slow_clock_edge.out){
+            result.d = alu.out // assign evaluated output to result
+            zsig.d = alu.z
+            vsig.d = alu.v
+            nsig.d = alu.n
+            states1.d = States_AUTO.ERR // proceed to next state
+                }
+            
+            States_AUTO.ERR:
+
+            // flip 0th bit of evaluated output if leftmost io dip switch is on to introduce possible error
+            if(slow_clock_edge.out){
+            if(io_dip[2][7]){
+                result.d[0] = ~result.q[0]
+                    }
+            states1.d = States_AUTO.CHECKER
+                }
+            
+            States_AUTO.CHECKER:
+
+            // check if evaluated output matches expected output of test case
+            if(slow_clock_edge.out){
+
+            // display address of test case if error is detected and halt auto tester
+            // continue if no error
+            if(result.q == rom_out.element){
+            checkersig.d = 1
+                }
+            else{
+                checkersig.d = 0
+                result.d = counter_ROM.q      
+                 }
+            states1.d = States_AUTO.IDLE // return to main state
+                }  
+        } 
+        
+        // manual fsm
+         case(states.q){
+            States_MANUAL.IDLE:
+
+                // button 0: start manual tester & assign and display first 16 bits of a
+                if (~slow_clock_enable.q && io_button_edge.out[0] && ~manuallock.q){ 
+                    manuallock.d = 1
+                    
+                    states.d = States_MANUAL.STORE16AFIRST
+                }
+
+                // button 1: proceed to state to assign and display last 16 bits of a
+                else if (io_button_edge.out[1] && manuallock.q){
+                    states.d = States_MANUAL.STORE16ALAST
+                }
+
+                // button 2: proceed to state to assign and display first 16 bits of b
+                else if (io_button_edge.out[2]&& manuallock.q){
+                    states.d = States_MANUAL.STORE16BFIRST
+                }
+
+                // button 4: proceed to state to assign and display last 16 bits of b
+                else if (io_button_edge.out[4]&& manuallock.q){
+                    states.d = States_MANUAL.STORE16BLAST
+                }
+
+                // button 3: proceed to state to assign and display alufn value
+                else if (io_button_edge.out[3] && manuallock.q){
+                    states.d = States_MANUAL.SETALU
+                }
+
+                // leftmost io dip switch: display computed outcome on io_leds and right hand side of io shield
+                else if (io_dip[2][7] && manuallock.q){
+                    states.d = States_MANUAL.DISPLAY
+                }
+            
+            States_MANUAL.STORE16AFIRST:
+            afirsthalf.d = c{io_dip[1],io_dip[0]}
+            result.d = c{c{io_dip[1],io_dip[0]},16b0}
+            states.d = States_MANUAL.IDLE
+            
+            States_MANUAL.STORE16ALAST:
+            asecondthalf.d = c{io_dip[1],io_dip[0]}
+            result.d = c{afirsthalf.q,io_dip[1],io_dip[0]}
+            states.d = States_MANUAL.IDLE
+            
+            States_MANUAL.STORE16BFIRST:
+            bfirsthalf.d = c{io_dip[1],io_dip[0]}
+            result.d = c{c{io_dip[1],io_dip[0]},16b0}
+            states.d = States_MANUAL.IDLE
+            
+            States_MANUAL.STORE16BLAST:
+            bsecondhalf.d = c{io_dip[1],io_dip[0]}
+            result.d = c{bfirsthalf.q,io_dip[1],io_dip[0]}
+            states.d = States_MANUAL.IDLE
+            
+            States_MANUAL.SETALU:
+            alufn.d = io_dip[2][5:0]
+            result.d = c{26b0,io_dip[2][5:0]}
+            states.d = States_MANUAL.IDLE
+            
+            States_MANUAL.DISPLAY:
+            result.d = alu.out
+            zsig.d = alu.z
+            vsig.d = alu.v
+            nsig.d = alu.n
+            states.d = States_MANUAL.IDLE
+            
+            
+        }
+    }
+    
+}

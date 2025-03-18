@@ -1,0 +1,20 @@
+module compare (
+    input z, // takes in values z, v, n from the adder in subtraction mode
+    input v,
+    input n,
+    input alufn[6],
+    output cmp
+) {
+    
+    always {
+        case(alufn[2:1]){
+            b01: cmp = z // check whether a == b, COMPEQ
+            b10: cmp = n ^v // bitwise XOR for negative and overflow, 
+                            //checks for negative sign while considering overflow, COMPLT
+            b11: cmp = z | (n^v) // checks for COMPLE, compare less than equal 
+            default: 
+                cmp = 0 
+        }
+        
+    }
+}
